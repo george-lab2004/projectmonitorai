@@ -36,12 +36,14 @@ Backend/
 │   └── user.model.ts
 ├── routes/                  # Express Router mounting points
 │   ├── auth.route.ts
+│   ├── cron.route.ts        # Vercel Cron trigger gateway
 │   ├── message.route.ts
 │   ├── notification.route.ts
 │   ├── project.route.ts
 │   ├── pusher.route.ts
 │   └── task.route.ts
 ├── utils/                   # Reusable utility scripts
+│   ├── cron.ts              # Background job handlers
 │   └── notification.util.ts # Automated db-write + Pusher push helper
 ├── validators/              # Joi request body schema validators
 │   ├── auth.validator.ts
@@ -49,6 +51,7 @@ Backend/
 │   └── task.validator.ts
 ├── package.json             # Engine and npm dependencies
 ├── tsconfig.json            # Strict TypeScript configuration parameters
+├── vercel.json              # Vercel Serverless Routing & Cron Schedules
 └── server.ts                # Application bootstrapper and core pipeline
 ```
 
@@ -124,10 +127,13 @@ Pusher enforces a secure verification handshake:
 
 | Endpoint | Method | Access | Logical Flow | Expected Payload |
 | :--- | :--- | :--- | :--- | :--- |
-| `/signup` | `POST` | Public | Validates input -> Checks if email exists -> Encrypts password using `bcrypt` -> Creates User in DB -> Generates JWT -> Sets cookie. | `name`, `email`, `password`, `role` |
-| `/login` | `POST` | Public | Validates input -> Finds user -> Verifies password -> Generates JWT -> Saves cookie. | `email`, `password` |
+| `/signup` | `POST` | Public | Validates input using `signUpValidator` -> Checks if email exists -> Encrypts password using `bcrypt` -> Creates User in DB (defaults `isVerified` to `false`) -> Generates JWT -> Sets cookie. | `name`, `email`, `password` |
+| `/login` | `POST` | Public | Validates input using `signInValidator` -> Finds user -> Verifies password -> Generates JWT -> Saves cookie. | `email`, `password` |
 | `/logout` | `POST` | Public | Resets the HTTP session cookie to an empty value and expires it immediately. | None |
 | `/me` | `GET` | Authenticated | Decodes JWT -> Retrieves logged-in user profile, excluding the password field. | None |
+| `/forgot-password` | `POST` | Public | Validates email -> Generates secure 6-digit OTP and 10-minute expiry -> Persists in User schema -> Sends password reset template via NodeMailer. | `email` |
+| `/reset-password` | `POST` | Public | Validates request -> Verifies OTP matches and is not expired -> Hashes new password -> Wipes reset fields -> Saves changes. | `email`, `otp`, `newPassword` |
+| `/verify-email` | `POST` | Public | Toggled on email callback. Locates user by email -> Flips `isVerified` flag to `true`. | `email` |
 
 ---
 
@@ -135,8 +141,8 @@ Pusher enforces a secure verification handshake:
 
 | Endpoint | Method | Access | Logical Flow | Expected Payload |
 | :--- | :--- | :--- | :--- | :--- |
-| `/` | `GET` | Authenticated | Scoped by role: Managers fetch only projects they manage; Team Members fetch only projects they are assigned to. Resolves potential data leaks. | None |
-| `/:id` | `GET` | Authenticated | Fetches a specific project by ID. Returns `404` if not found. Access control checks project membership or manager role. | None |
+| `/` | `GET` | Manager Only | Restricts global project list lookups to users with System Manager roles. Resolves cross-tenant data visibility issues. | None |
+| `/:id` | `GET` | Authenticated | Fetches a specific project by ID. Returns `404` if not found. Access control checks project membership or manager role (BOLA/IDOR prevention). | None |
 | `/` | `POST` | Manager Only | Creates a project. Automatically stores the manager's ID. **Automated Notification**: Loops through assigned members and creates dynamic database notifications and Pusher notifications informing them of their project and new group chat assignment. | `title`, `description`, `status`, `deadline`, `color`, `icon`, `members` (optional) |
 | `/:id` | `PUT` | Manager Only | Updates project metadata (title, description, status, deadlines, members). Access restricted strictly to the project manager. | `title`, `description`, `status`, `deadline`, `color`, `icon`, `members` (optional) |
 | `/:id` | `DELETE` | Manager Only | Deletes the project from MongoDB. | None |
@@ -148,7 +154,7 @@ Pusher enforces a secure verification handshake:
 | Endpoint | Method | Access | Logical Flow | Expected Payload |
 | :--- | :--- | :--- | :--- | :--- |
 | `/` | `GET` | Authenticated | Managers see all tasks. Team members see only tasks assigned to their MongoDB User ID. | None |
-| `/:id` | `GET` | Authenticated | Fetches a task populated with its assignee, project details, and comments (with comment author avatars). | None |
+| `/:id` | `GET` | Authenticated | Fetches a task populated with its assignee, project details, and comments (with comment author avatars). Verifies that the user is the project manager, a project team member, or the task assignee to block BOLA/IDOR brute-force attacks. | None |
 | `/` | `POST` | Manager Only | Creates a task. **Automated Notification**: Triggers a notification to the assigned developer: *"You have been assigned task X in Project Y"* | `title`, `description`, `project`, `assignee`, `deadline`, `priority` |
 | `/:id` | `PUT` | Manager / Assignee | Updates task fields. Standard authorization ensures only the manager or the assigned developer can edit. | Any task fields |
 | `/:id` | `DELETE` | Manager Only | Deletes the task. | None |
@@ -197,6 +203,14 @@ Pusher enforces a secure verification handshake:
 
 ---
 
+### ⏱️ 4.8 Cron Endpoints (`/api/cron`)
+
+| Endpoint | Method | Access | Logical Flow | Expected Payload |
+| :--- | :--- | :--- | :--- | :--- |
+| `/` | `GET` | Trigger/Cron Only | Triggered by Vercel Scheduler or local call. If production environment, verifies `Authorization: Bearer <CRON_SECRET>` headers before asynchronously invoking project AI reviews. | None |
+
+---
+
 ## 🤖 5. Proactive AI Auditor & Event-Driven System
 
 Instead of a passive conversational chatbot, the Project Monitor features a **Proactive AI Agent** designed to run autonomously in the background to detect team bottlenecks and update project metrics.
@@ -218,9 +232,10 @@ When triggered, the proactive auditor executes the following pipeline:
 5. **Team WebSocket Dispatch**: Dispatches any flagged risk/workload alerts to team members using our database notifications and real-time Pusher broadcasts.
 
 ### 5.2 Background Scheduling (Cron Job)
-The system schedules automated background audits using `node-cron` inside `utils/cron.ts`:
-* **Schedule**: Runs every 8 hours (`0 */8 * * *`) – executing 3 automatic runs daily.
-* **Scope**: Scans all active projects (excluding completed ones) and updates their status dashboards in MongoDB automatically.
+Proactive project analysis runs in the background using a hybrid scheduled runner architecture:
+*   **Local Node-Cron Execution**: In development mode (`NODE_ENV=development`), `utils/cron.ts` runs locally every 8 hours (`0 */8 * * *`) on your local Node runtime.
+*   **Vercel Serverless Scheduler**: In production mode (`NODE_ENV=production`), Vercel’s built-in cron trigger hits our secure `GET /api/cron` route every 24 hours at midnight UTC (`0 0 * * *`) as allowed under Vercel Hobby limits.
+*   **Scope**: Both trigger types pull all active projects and query Gemini for updated progress, workloads, and risks, writing the summaries directly to MongoDB and broadcasting notifications via Pusher.
 
 ### 5.3 Development Data Seeder
 For testing, demoing, and evaluation, a command-line seeder script is provided in `utils/seeder.ts`:
