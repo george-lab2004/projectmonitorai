@@ -9,6 +9,7 @@ const projectSchema = new Schema({
     icon: { type: String, required: true },
     healthScore: { type: Number, required: true, default: 0 },
     aiSummary: { type: String, required: true, default: "" },
+    aiRecommendations: { type: [String], default: [] },
     aiGenerated: { type: Boolean, required: true, default: false },
     aiRunsToday: { type: Number, required: true, default: 0 },
     lastAiRunAt: { type: Date },
@@ -29,6 +30,7 @@ export interface IProject extends Document {
     icon: string;
     healthScore: number;
     aiSummary: string;
+    aiRecommendations?: string[];
     aiGenerated: boolean;
     aiRunsToday: number;
     lastAiRunAt?: Date;

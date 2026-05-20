@@ -71,16 +71,20 @@ You MUST return a JSON response matching this schema:
 {
   "healthScore": <number between 0 and 100>,
   "aiSummary": "<paragraph summarizing progress, naming delayed or overloaded employees by name, and suggesting concrete next steps>",
+  "recommendations": [
+    "<actionable suggestion 1 for the manager>",
+    "<actionable suggestion 2 for the manager>"
+  ],
   "riskAlerts": [
     {
-      "recipientId": "<mongodb user objectid string of assignee or manager>",
+      "recipientId": "<mongodb user objectid string>",
       "title": "Project Risk: Overdue Task",
       "body": "Task [Title] is overdue. Please sync up."
     }
   ],
   "workloadAlerts": [
     {
-      "recipientId": "<mongodb user objectid string of assignee or manager>",
+      "recipientId": "<mongodb user objectid string>",
       "title": "Workload Alert: Overloaded",
       "body": "[Name] has [count] active tasks. Please re-assign tasks if necessary."
     }
@@ -89,10 +93,10 @@ You MUST return a JSON response matching this schema:
 
 Instructions for JSON:
 - Do not add markdown backticks (\`\`\`json). Just return the raw JSON text.
-- If a task is overdue, set recipientId to the assignee's ObjectId string if it exists, otherwise use the project manager's ID: "${project.manager.toString()}".
-- If a developer is overloaded, set recipientId to that developer's ObjectId string.
+- If a task is overdue, generate TWO riskAlert entries: one targeting the assignee's ObjectId string (if it exists) as recipientId, and a duplicate alert targeting the project manager's ObjectId string: "${project.manager.toString()}" as recipientId.
+- If a developer is overloaded with too many active tasks, generate a workloadAlert targeting the project manager's ObjectId string: "${project.manager.toString()}" as recipientId (do NOT send overload alerts to the developer).
 - Keep the aiSummary professional, direct, and under 150 words.
-- Always include the manager ID: "${project.manager.toString()}" in the alert lists if the issue affects project delivery.
+- Provide 2 to 5 actionable suggestions in the recommendations list.
 `;
 
     // 4. Call Gemini with retry loop
@@ -131,6 +135,7 @@ Instructions for JSON:
 
     project.healthScore = typeof analysis.healthScore === 'number' ? analysis.healthScore : 100;
     project.aiSummary = analysis.aiSummary || "Audit completed successfully.";
+    project.aiRecommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
     project.aiGenerated = true;
     project.aiRunsToday = currentRunsToday + 1;
     project.lastAiRunAt = new Date();

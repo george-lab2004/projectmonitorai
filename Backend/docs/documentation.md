@@ -142,7 +142,7 @@ Pusher enforces a secure verification handshake:
 | Endpoint | Method | Access | Logical Flow | Expected Payload |
 | :--- | :--- | :--- | :--- | :--- |
 | `/` | `GET` | Manager Only | Restricts global project list lookups to users with System Manager roles. Resolves cross-tenant data visibility issues. | None |
-| `/:id` | `GET` | Authenticated | Fetches a specific project by ID. Returns `404` if not found. Access control checks project membership or manager role (BOLA/IDOR prevention). | None |
+| `/:id` | `GET` | Authenticated | Fetches a specific project by ID. Returns `404` if not found. Access control checks project membership or manager role. **Security Filtering**: Dynamically deletes the `aiRecommendations` array if the requesting user is not the project manager (BOLA/IDOR prevention). | None |
 | `/` | `POST` | Manager Only | Creates a project. Automatically stores the manager's ID. **Automated Notification**: Loops through assigned members and creates dynamic database notifications and Pusher notifications informing them of their project and new group chat assignment. | `title`, `description`, `status`, `deadline`, `color`, `icon`, `members` (optional) |
 | `/:id` | `PUT` | Manager Only | Updates project metadata (title, description, status, deadlines, members). Access restricted strictly to the project manager. | `title`, `description`, `status`, `deadline`, `color`, `icon`, `members` (optional) |
 | `/:id` | `DELETE` | Manager Only | Deletes the project from MongoDB. | None |
@@ -224,12 +224,19 @@ When triggered, the proactive auditor executes the following pipeline:
    {
      "healthScore": 85,
      "aiSummary": "Project is on-track. However, John is overloaded...",
+     "recommendations": [
+       "Schedule a workload sync with John to offload Task A",
+       "Extend the project deadline due to multiple overdue critical tasks"
+     ],
      "riskAlerts": [...],
      "workloadAlerts": [...]
    }
    ```
-4. **Database Write**: Automatically saves the `healthScore` and `aiSummary` into the `Project` document in MongoDB.
-5. **Team WebSocket Dispatch**: Dispatches any flagged risk/workload alerts to team members using our database notifications and real-time Pusher broadcasts.
+4. **Database Write**: Automatically saves `healthScore`, `aiSummary`, and the `recommendations` array (`aiRecommendations` field) into the `Project` document in MongoDB.
+5. **Role-Based Alert Routing**:
+   * **Overdue Tasks**: Triggers dual alerts: one sent to the **assigned developer** (recipientId) to nudge them, and a duplicate alert sent to the **project manager** for visibility.
+   * **Overloaded Developers**: Triggers an alert sent **exclusively to the project manager** (recipientId) so they can re-allocate resources (does not notify the developer).
+   * All notifications are persisted in the database and pushed in real-time via Pusher.
 
 ### 5.2 Background Scheduling (Cron Job)
 Proactive project analysis runs in the background using a hybrid scheduled runner architecture:

@@ -23,6 +23,14 @@ export const getProject = asyncHandler(async (req: AuthRequest, res: Response) =
     }
 
     const projects = await Project.find(query).lean();
+
+    // Strip out AI recommendations for non-manager users (employees/members)
+    if (req.user.role !== "manager") {
+        projects.forEach(project => {
+            delete project.aiRecommendations;
+        });
+    }
+
     res.status(200).json(projects);
 });
 export const getProjectById = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -33,15 +41,21 @@ export const getProjectById = asyncHandler(async (req: AuthRequest, res: Respons
     }
 
     // Access control check: Must be manager OR assigned team member
+    let isManager = false;
     if (req.user) {
         const userId = req.user._id.toString();
-        const isManager = project.manager?.toString() === userId || req.user.role === 'manager';
+        isManager = project.manager?.toString() === userId || req.user.role === 'manager';
         const isMember = project.members?.some(memberId => memberId.toString() === userId);
         if (!isManager && !isMember) {
             return res.status(403).json({ message: "Not authorized to access this project" });
         }
     } else {
         return res.status(401).json({ message: "Not authorized" });
+    }
+
+    // Strip out AI recommendations from response payload if the user is not the manager
+    if (!isManager) {
+        delete project.aiRecommendations;
     }
 
     res.status(200).json(project);
