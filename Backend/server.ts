@@ -12,6 +12,7 @@ import taskRoutes from "./routes/task.route.js";
 import messageRoutes from "./routes/message.route.js";
 import notificationRoutes from "./routes/notification.route.js";
 import pusherRoutes from "./routes/pusher.route.js";
+import cronRoutes from "./routes/cron.route.js";
 import aiRoutes from "./ai/ai.route.js";
 import { notFound, errorHandler } from "./middlewares/error.middleware.js";
 
@@ -37,6 +38,7 @@ app.use("/api/tasks", taskRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/pusher", pusherRoutes);
+app.use("/api/cron", cronRoutes);
 app.use("/api/ai", aiRoutes);
 
 // Base route
@@ -48,6 +50,11 @@ app.get("/", (req, res) => {
 app.use(notFound);
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+// Only listen locally (avoid binding port inside serverless environments)
+if (process.env.NODE_ENV !== "production") {
+    app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+    });
+}
+
+export default app;
